@@ -254,6 +254,9 @@ def note_intervals(note_ids: list[int]) -> dict[int, int]:
 
 
 def build_note(card: dict, deck: str, model: str | None = None) -> dict:
+    # Una tarjeta de frase entera (o una selección que es toda la frase) la
+    # enseñaría dos veces, y su traducción también: va solo arriba.
+    whole = (card["paraula"] or "").strip() == (card["frase"] or "").strip()
     return {
         "deckName": deck,
         "modelName": model or config.NOTE_TYPE,
@@ -264,8 +267,8 @@ def build_note(card: dict, deck: str, model: str | None = None) -> dict:
             # «enviando N». El lema siempre está.
             "Paraula": card["paraula"] or card.get("lema") or "",
             "ParaulaES": card["paraula_es"] or "",
-            "Frase": card["frase"] or "",
-            "FraseES": card["frase_es"] or "",
+            "Frase": "" if whole else card["frase"] or "",
+            "FraseES": "" if whole else card["frase_es"] or "",
             "Audio": f"[sound:{card['audio_file']}]" if card.get("audio_file") else "",
             "Imatge": f'<img src="{card["image_file"]}">' if card.get("image_file") else "",
             "Font": card.get("font") or "",

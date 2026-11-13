@@ -1124,6 +1124,7 @@ async function openPopup(segIndex, selection, anchorEl, pin) {
   PINNED = !!pin;
   POP = { segIndex, selection, anchor: anchorEl,
           lemma: (anchorEl.dataset?.l || selection).toLowerCase() };
+  setPopupWhole(false);
   $("wp-word").textContent = selection;
   $("wp-ipa").textContent = "";
   $("wp-meta").textContent = "…";
@@ -1156,6 +1157,40 @@ async function openPopup(segIndex, selection, anchorEl, pin) {
   markStatusButtons(stOf(r.lemma));
   renderPopupLookup(r);
   if (POP.anchor) positionPopup(POP.anchor);   // recolocar con la altura final
+}
+
+// El mismo popup con la frase entera (↑): la frase, su traducción y los
+// mismos botones (+ la manda, ✏️ abre el editor). Sin lema no hay estado,
+// acepciones ni diccionario, así que esa parte se esconde.
+function setPopupWhole(on) {
+  $("word-pop").classList.toggle("whole", on);
+  for (const id of ["wp-status", "wp-foot", "wp-level", "wp-sentence-ca"]) $(id).hidden = on;
+  if (on) for (const id of ["wp-say", "wp-dict", "wp-conj-btn", "wp-gloss", "wp-userdefs", "wp-def"])
+    $(id).hidden = true;
+}
+async function openSentencePopup(segIndex, anchorEl) {
+  if (POP?.whole && POP.segIndex === segIndex && !$("word-pop").hidden) { closePopup(); return; }
+  if (!V.paused) V.pause();
+  RESUME = false; PINNED = true; clearTimeout(CLOSE_TIMER);
+  const text = SEGS[segIndex].text;
+  POP = { segIndex, selection: text, anchor: anchorEl, lemma: "", whole: true };
+  setPopupWhole(true);
+  $("wp-word").textContent = text;
+  $("wp-ipa").textContent = ""; $("wp-meta").textContent = "";
+  for (const id of ["wp-senses", "wp-examples"]) $(id).innerHTML = "";
+  $("wp-sentence-es").textContent = ES_CACHE[segIndex] || "…";
+  $("word-pop").classList.remove("loading");
+  positionPopup(anchorEl);
+  $("word-pop").hidden = false;
+  if (!ES_CACHE[segIndex]) {
+    const r = await api(`/api/sessions/${SESSION.id}/segments/${segIndex}/translate`, { method: "POST" })
+      .catch(() => ({}));
+    ES_CACHE[segIndex] = r.text_es || "";
+    if (POP?.whole && POP.segIndex === segIndex) {
+      $("wp-sentence-es").textContent = ES_CACHE[segIndex];
+      positionPopup(anchorEl);
+    }
+  }
 }
 
 const LEVEL_LABEL = { 5: "muy frecuente", 4: "frecuente", 3: "media", 2: "poco común", 1: "rara" };
@@ -1321,25 +1356,27 @@ $("wp-word-es").addEventListener("input", () => {
 
 function mineFromPopup() {
   if (!POP) return;
-  const { segIndex, selection, chosen } = POP;
+  const { segIndex, selection, chosen, whole } = POP;
   closePopup();
-  mineQuick(segIndex, selection, chosen || "");
+  if (whole) mineQuick(segIndex, "", "", true);
+  else mineQuick(segIndex, selection, chosen || "");
 }
 
 function editFromPopup() {
   if (!POP) return;
-  const { segIndex, selection } = POP;
+  const { segIndex, selection, whole } = POP;
   closePopup();
-  mine(segIndex, selection);
+  if (whole) mine(segIndex, "", 0, 0, { whole: true });
+  else mine(segIndex, selection);
 }
 
 // minado en segundo plano: crea + envía a Anki sin panel ni pausa
-async function mineQuick(segIndex, selection, paraula_es = "") {
+async function mineQuick(segIndex, selection, paraula_es = "", whole = false) {
   toast(t("ts.card_making"));
   const r = await api("/api/cards/mine", {
     method: "POST",
     body: JSON.stringify({ session_id: SESSION.id, segment_index: segIndex,
-      selection, paraula_es, offset: OFFSET }),
+      selection, paraula_es, offset: OFFSET, whole }),
   });
   if (r.error) { toast(errMsg(r), "err"); return; }
   if (r.word_status) STATUS[r.lema] = r.word_status;
@@ -1353,19 +1390,21 @@ async function mine(segIndex, selection, padB = 0, padA = 0, extra = {}) {
   V.pause();
   PAD = { b: padB, a: padA };
   toast(t("ts.card_making"));
+  const whole = !!extra.whole;
   const p = await api("/api/cards/preview", {
     method: "POST",
     body: JSON.stringify({ session_id: SESSION.id, segment_index: segIndex,
-      selection, pad_before: padB, pad_after: padA, offset: OFFSET }),
+      selection, pad_before: padB, pad_after: padA, offset: OFFSET, whole }),
   });
-  CARD = { ...p, session_id: SESSION.id, segment_index: segIndex };
+  CARD = { ...p, session_id: SESSION.id, segment_index: segIndex, whole };
   // el clip animado (WebP) sustituye a la captura estática cuando existe
   CARD.image_file = p.clip_file || p.image_file;
   $("c-paraula").value = p.paraula;
   $("c-paraula-es").value = extra.chosen || p.paraula_es;
   $("c-frase").value = p.frase;
   $("c-frase-es").value = p.frase_es;
-  $("c-meta").textContent = `${p.headword || p.lema} · ${p.pos} · ${p.freq_rank} (zipf ${p.freq_zipf.toFixed(1)}) · ${p.font}`;
+  $("c-meta").textContent = whole ? p.font
+    : `${p.headword || p.lema} · ${p.pos} · ${p.freq_rank} (zipf ${p.freq_zipf.toFixed(1)}) · ${p.font}`;
   $("senses").innerHTML = p.senses.map((s) =>
     `<span class="sense" data-es="${esc(s.es)}">${esc(s.es)} <small>${esc(s.pos)}</small></span>`).join("");
   for (const sp of $("senses").children)
@@ -1384,8 +1423,8 @@ async function mine(segIndex, selection, padB = 0, padA = 0, extra = {}) {
   if (p.audio_file) $("c-audio").play().catch(() => {});
 }
 
-$("pad-before").onclick = () => CARD && mine(CARD.segment_index, $("c-paraula").value, PAD.b + 1, PAD.a);
-$("pad-after").onclick = () => CARD && mine(CARD.segment_index, $("c-paraula").value, PAD.b, PAD.a + 1);
+$("pad-before").onclick = () => CARD && mine(CARD.segment_index, $("c-paraula").value, PAD.b + 1, PAD.a, { whole: CARD.whole });
+$("pad-after").onclick = () => CARD && mine(CARD.segment_index, $("c-paraula").value, PAD.b, PAD.a + 1, { whole: CARD.whole });
 $("c-cancel").onclick = () => { $("card-panel").hidden = true; };
 
 async function sendCard() {
@@ -1409,8 +1448,63 @@ async function sendCard() {
 }
 $("c-send").onclick = sendCard;
 
+// ---------- frase entera a Anki (⇧ derecha por defecto) ----------
+// Se oye la frase, se pulsa, y va entera a Anki sin elegir palabra. La tecla
+// se cambia en Ajustes → Atajos (va por e.code: «ShiftRight», «F5», «KeyX»).
+// Una tecla modificadora cuenta al soltarla y solo si no se pulsó otra
+// mientras tanto, para que ⇧W, ⇧Q, ⇧+clic… sigan como siempre.
+const DEFAULT_SENTENCE_KEY = "ShiftRight";
+const MODIFIER_CODES = ["ShiftLeft", "ShiftRight", "AltLeft", "AltRight",
+  "ControlLeft", "ControlRight", "MetaLeft", "MetaRight"];
+// teclas con función fija en el reproductor (mismo conjunto que _FIXED_KEYS)
+const FIXED_CODES = ["Space", "Enter", "Escape", "Tab", "ArrowLeft", "ArrowRight",
+  "ArrowUp", "ArrowDown", "BracketLeft", "BracketRight", "KeyK",
+  "Digit1", "Digit2", "Digit3", "Digit4", "Digit5"];
+const sentenceKey = () => SETTINGS?.sentence_key || DEFAULT_SENTENCE_KEY;
+// Lo que lleva impreso la tecla en el teclado de quien usa la app: en uno
+// alemán «Slash» es «-» y «Backslash» es «#» (solo Chrome/Edge lo saben)
+let KEY_LAYOUT = null;
+navigator.keyboard?.getLayoutMap?.().then((m) => { KEY_LAYOUT = m; }).catch(() => {});
+function keyLabel(code) {
+  const mod = code.match(/^(Shift|Alt|Control|Meta)(Left|Right)$/);
+  if (mod) {
+    const sym = { Shift: "⇧", Alt: "⌥", Control: "⌃", Meta: "⌘" }[mod[1]];
+    return `${sym} ${t(mod[2] === "Right" ? "hf.right" : "hf.left")}`;
+  }
+  return (KEY_LAYOUT?.get(code) || code.replace(/^(Key|Digit)/, "")).toUpperCase();
+}
+// show = abrir el popup con la frase (↑) para verla antes de mandarla
+function sentenceToAnki(show = false) {
+  if (!$("settings-view").hidden || !SESSION) return false;
+  const inReader = !$("reader").hidden;
+  const seg = inReader ? (readerOne() ? READ_ONE : -1) : CUR;
+  if (seg < 0 || !SEGS[seg]) { toast(t("ts.no_sentence"), "err"); return true; }
+  if (show) openSentencePopup(seg, inReader ? $("reader-page") : $("overlay-ca"));
+  else mineQuick(seg, "", "", true);
+  return true;
+}
+const typing = (el) => el.tagName === "INPUT" || el.tagName === "TEXTAREA" ||
+  el.tagName === "SELECT" || el.isContentEditable;
+let MOD_ALONE = false;
+document.addEventListener("keydown", (e) => {
+  const sk = sentenceKey();
+  if (CAPTURING || e.code !== sk) { MOD_ALONE = false; return; }
+  if (MODIFIER_CODES.includes(sk)) { if (!e.repeat) MOD_ALONE = true; return; }
+  // con ⇧ es otra tecla: ⇧/ es «?» (ayuda) en un teclado inglés
+  if (e.repeat || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+  // tecla normal: actúa al pulsarla y no llega al handler general
+  if (sentenceToAnki()) { e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
+document.addEventListener("mousedown", () => { MOD_ALONE = false; }, true);
+document.addEventListener("keyup", (e) => {
+  if (e.code !== sentenceKey() || !MOD_ALONE) return;
+  MOD_ALONE = false;
+  if (!typing(e.target) && !CAPTURING) sentenceToAnki();
+});
+
 // ---------- teclado (mapa Migaku + estados) ----------
-// A/← anterior · D/→ siguiente · S/↓ repetir · W/↑ ocultar subs · shift+W ocultar ES ·
+// A/← anterior · D/→ siguiente · S/↓ repetir · ↑ popup con la frase entera ·
+// W ocultar subs · shift+W ocultar ES ·
 // G navegador · C copiar · Q minar · 1-4 estado · E dual · P auto-pausa · F pantalla completa
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT" || e.target.isContentEditable) {
@@ -1440,12 +1534,18 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "[") { e.preventDefault(); bumpOffset(-0.1); return; }
   if (e.key === "]") { e.preventDefault(); bumpOffset(0.1); return; }
   if (k === "k") { setCondensed(!CONDENSED); return; }
+  if (e.key === "ArrowUp") { e.preventDefault(); sentenceToAnki(true); return; }
   // teclas de letra remapeables (⚙️) + flechas fijas
   const act = KEY2ACTION[k] ||
-    ({ ArrowLeft: "prev", ArrowRight: "next", ArrowDown: "replay", ArrowUp: "subs" })[e.key];
+    ({ ArrowLeft: "prev", ArrowRight: "next", ArrowDown: "replay" })[e.key];
   if (act === "prev") { e.preventDefault(); prevSeg(); }
   else if (act === "next") { e.preventDefault(); nextSeg(); }
-  else if (act === "replay") { e.preventDefault(); replaySeg(); }
+  else if (act === "replay") {
+    // ↓ también cierra el popup abierto (palabra o frase entera) y repite
+    e.preventDefault();
+    if (POP && !$("word-pop").hidden) closePopup();
+    replaySeg();
+  }
   else if (act === "subs") {
     e.preventDefault();
     if (e.shiftKey) { HIDE_ES = !HIDE_ES; $("overlay-es").hidden = !DUAL || HIDE_ES; }
@@ -1455,6 +1555,8 @@ document.addEventListener("keydown", (e) => {
   else if (act === "copy" && CUR >= 0) { navigator.clipboard.writeText(SEGS[CUR].text).then(() => toast(t("ts.copied"), "ok")); }
   else if (act === "mine") {
     const inPop = POP && !$("word-pop").hidden;
+    // con la frase entera en el popup (↑), Q la manda y ⇧Q abre el editor
+    if (inPop && POP.whole) { if (e.shiftKey) editFromPopup(); else mineFromPopup(); return; }
     const seg = inPop ? POP.segIndex : HOVER?.segIndex;
     const sel = inPop ? POP.selection : HOVER?.text;
     if (sel === undefined) { toast(t("ts.hover", (SETTINGS?.keymap?.mine || "Q").toUpperCase()), "err"); return; }
@@ -1729,7 +1831,9 @@ function renderKeyEditor() {
   const km = SETTINGS?.keymap || DEFAULT_KEYMAP;
   $("set-keys").innerHTML = ACTIONS.map((a) =>
     `<div class="set-row"><label>${actionLabel(a)}</label>
-     <button class="keybtn" data-act="${a}">${CAPTURING === a ? "pulsa una tecla…" : (km[a] || "?").toUpperCase()}</button></div>`).join("");
+     <button class="keybtn" data-act="${a}">${CAPTURING === a ? "pulsa una tecla…" : (km[a] || "?").toUpperCase()}</button></div>`).join("") +
+    `<div class="set-row"><label>${t("hf.sentence")}</label>
+     <button class="keybtn" data-act="sentence">${CAPTURING === "sentence" ? "pulsa una tecla…" : keyLabel(sentenceKey())}</button></div>`;
   for (const b of $("set-keys").querySelectorAll(".keybtn"))
     b.onclick = () => { CAPTURING = b.dataset.act; renderKeyEditor(); };
 }
@@ -1740,6 +1844,7 @@ const helpFixed = () => [
   ["Espacio", t("hf.space")],
   ["1 – 5", t("hf.states")],
   ["Q / ⇧Q", t("hf.card")],
+  ["↑", t("hf.sentence_edit")],
   ["[  ]", t("hf.sync")],
   ["K", t("hf.condensed")],
   ["⏎", t("hf.send")],
@@ -1749,7 +1854,8 @@ function renderHelp() {
   const km = SETTINGS?.keymap || DEFAULT_KEYMAP;
   const row = (k, d) => `<div class="help-row"><kbd>${k}</kbd><span>${d}</span></div>`;
   const remap = ACTIONS
-    .map((a) => row((km[a] || "?").toUpperCase(), actionLabel(a))).join("");
+    .map((a) => row((km[a] || "?").toUpperCase(), actionLabel(a))).join("") +
+    row(keyLabel(sentenceKey()), t("hf.sentence"));
   const fixed = helpFixed().map(([k, d]) => row(k, d)).join("");
   $("help-body").innerHTML =
     `<div class="help-cols">
@@ -1779,11 +1885,25 @@ document.addEventListener("keydown", (e) => {
   e.preventDefault(); e.stopPropagation();
   const k = e.key.toLowerCase();
   const act = CAPTURING; CAPTURING = null;
+  if (act === "sentence") {
+    // cualquier tecla menos las fijas y las letras del mapa
+    const km = SETTINGS?.keymap || DEFAULT_KEYMAP;
+    const letter = e.code.startsWith("Key") && e.code.slice(3).toLowerCase();
+    if (e.code === "Escape") { renderKeyEditor(); return; }
+    if (FIXED_CODES.includes(e.code) || (letter && Object.values(km).includes(letter))) {
+      toast(t("ts.key_taken"), "err"); renderKeyEditor(); return;
+    }
+    saveSettings({ sentence_key: e.code });
+    return;
+  }
   if (!/^[a-z]$/.test(k)) { toast(t("ts.keys_az"), "err"); renderKeyEditor(); return; }
+  const clash = sentenceKey().toLowerCase() === `key${k}`;
+  if (clash) { toast(t("ts.key_taken"), "err"); renderKeyEditor(); return; }
   saveSettings({ keymap: { [act]: k } });
 }, true);
 
-$("set-keys-reset").onclick = () => saveSettings({ keymap: { ...DEFAULT_KEYMAP } });
+$("set-keys-reset").onclick = () =>
+  saveSettings({ keymap: { ...DEFAULT_KEYMAP }, sentence_key: DEFAULT_SENTENCE_KEY });
 
 function renderUserdicts(dicts) {
   $("set-userdict-list").innerHTML = dicts.length
@@ -2206,11 +2326,16 @@ function readerKey(e) {
     return;
   }
   const k = e.key.toLowerCase();
+  if (e.key === "ArrowUp" && readerOne()) { e.preventDefault(); sentenceToAnki(true); return; }
   const act = KEY2ACTION[k] ||
     ({ ArrowLeft: "prev", ArrowRight: "next", ArrowDown: "replay" })[e.key];
   if (act === "prev") { e.preventDefault(); readerGo(-1); }
   else if (act === "next") { e.preventDefault(); readerGo(1); }
-  else if (act === "replay") { e.preventDefault(); saySentence(); }
+  else if (act === "replay") {
+    e.preventDefault();
+    if (POP && !$("word-pop").hidden) closePopup();
+    saySentence();
+  }
   else if (act === "copy") {
     const txt = readerOne() ? (SEGS[READ_ONE]?.text || "")
                             : $("reader-page").textContent.trim();
@@ -2219,6 +2344,8 @@ function readerKey(e) {
   }
   else if (act === "mine") {
     const inPop = POP && !$("word-pop").hidden;
+    // con la frase entera en el popup (↑), Q la manda y ⇧Q abre el editor
+    if (inPop && POP.whole) { if (e.shiftKey) editFromPopup(); else mineFromPopup(); return; }
     const seg = inPop ? POP.segIndex : HOVER?.segIndex;
     const sel = inPop ? POP.selection : HOVER?.text;
     if (sel === undefined) {

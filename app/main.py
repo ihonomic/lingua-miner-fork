@@ -256,6 +256,12 @@ def _word_es(selection: str, lemma: str) -> str:
     return out
 
 
+# La frase entera no es una palabra: sin lema no entra en la lista de
+# palabras, y no se busca en el diccionario ni se traduce dos veces.
+_SENTENCE_INFO = {"lemma": "", "pos": "", "headword": "", "gloss_key": "",
+                  "word_es": ""}
+
+
 def _word_info(selection: str, sentence: str) -> dict:
     """Lema (clave del estado), categoría, forma de diccionario y traducción.
 
@@ -393,6 +399,8 @@ DEFAULT_SETTINGS = {
     # plantilla de las tarjetas en Anki: "reading" (palabra y frase delante)
     # o "listening" (delante solo imagen y audio, para entrenar el oído)
     "card_layout": "reading",
+    # La frase entera a Anki (KeyboardEvent.code): ⇧ derecha, junto a las flechas
+    "sentence_key": "ShiftRight",
     "keymap": {"prev": "a", "next": "d", "replay": "s", "mine": "q",
                "subs": "w", "browser": "g", "copy": "c", "dual": "e",
                "autopause": "p", "fullscreen": "f", "recommended": "r"},
@@ -1095,12 +1103,18 @@ def sync_statuses():
         iv = intervals.get(p["anki_note_id"])
         if iv is None:
             continue
+        # Una tarjeta de frase entera no tiene lema: set_word_status no guarda
+        # nada, y cada vuelta a la ventana avisaba «1 palabra actualizada».
+        # La clave va como la guarda la base (minúsculas), o pasaría lo mismo.
+        lemma = (p["lema"] or "").strip().lower()
+        if not lemma:
+            continue
         target = "known" if iv >= 21 else "learning"
-        current = statuses.get(p["lema"])
+        current = statuses.get(lemma)
         if current in ("ignored",):
             continue
         if current != target:
-            db.set_word_status(CON, p["lema"], target, _lang())
+            db.set_word_status(CON, lemma, target, _lang())
             n += 1
     return {"synced": n}
 
@@ -1310,7 +1324,8 @@ def translate_segment(sid: str, idx: int):
 class PreviewReq(BaseModel):
     session_id: str
     segment_index: int
-    selection: str
+    selection: str = ""
+    whole: bool = False   # la frase entera (↑), sin elegir palabra
     pad_before: int = 0   # extend audio N segments back
     pad_after: int = 0
     offset: float = 0.0   # desfase subtítulo↔media en segundos (srt desajustado)
@@ -1318,7 +1333,7 @@ class PreviewReq(BaseModel):
 
 def _build_preview(s: dict, segment_index: int, selection: str,
                    pad_before: int = 0, pad_after: int = 0,
-                   offset: float = 0.0) -> dict:
+                   offset: float = 0.0, whole: bool = False) -> dict:
     segs = json.loads(s["transcript_json"])
     seg = segs[segment_index]
 
@@ -1326,7 +1341,8 @@ def _build_preview(s: dict, segment_index: int, selection: str,
     # rama se lanzaban tres ffmpeg contra un .txt, fallaban los tres y la
     # tarjeta salía muda. La voz la pone Piper, que ya está para pronunciar.
     if s.get("source_type") == "text":
-        return _text_preview(s, segs, segment_index, selection, pad_before, pad_after)
+        return _text_preview(s, segs, segment_index, selection, pad_before, pad_after,
+                             whole=whole)
 
     start = max(0.0, segs[max(0, segment_index - pad_before)]["start"] + offset)
     end = max(0.0, segs[min(len(segs) - 1, segment_index + pad_after)]["end"] + offset)
@@ -1394,21 +1410,24 @@ def _build_preview(s: dict, segment_index: int, selection: str,
             except OSError:
                 pass
 
-    info = _word_info(selection, seg["text"])
+    if whole:
+        selection = seg["text"]
+    info = _SENTENCE_INFO if whole else _word_info(selection, seg["text"])
     lemma, pos = info["lemma"], info["pos"]
-    z = nlp.zipf(selection)
-    senses = _senses(selection, lemma) if languages.spanish_sources_active() else []
+    z = 0.0 if whole else nlp.zipf(selection)
+    senses = (_senses(selection, lemma)
+              if languages.spanish_sources_active() and not whole else [])
     frase_es = translate.sentence(seg["text"])
     word_es = info["word_es"]
     return {
         "paraula": selection,
         "lema": lemma, "pos": pos, "headword": info["headword"],
-        "paraula_es": _card_word(info),
+        "paraula_es": frase_es if whole else _card_word(info),
         "senses": [{"es": es, "pos": p} for es, p in senses[:8]],
         "active": _active_sense(senses[:8], frase_es, word_es),
         "frase": seg["text"],
         "frase_es": frase_es,
-        "freq_zipf": z, "freq_rank": nlp.freq_badge(z),
+        "freq_zipf": z, "freq_rank": "" if whole else nlp.freq_badge(z),
         "audio_file": audio_name if audio_ok else "",
         "image_file": image_name if image_ok else "",
         "clip_file": clip_name if clip_ok else "",
@@ -1417,7 +1436,8 @@ def _build_preview(s: dict, segment_index: int, selection: str,
 
 
 def _text_preview(s: dict, segs: list, idx: int, selection: str,
-                  pad_before: int = 0, pad_after: int = 0) -> dict:
+                  pad_before: int = 0, pad_after: int = 0,
+                  whole: bool = False) -> dict:
     """Tarjeta desde un libro: frase, traducción y voz neural. Sin imagen.
 
     Los ⏪+ / +⏩ del editor siguen valiendo — amplían la frase con la anterior
@@ -1433,21 +1453,24 @@ def _text_preview(s: dict, segs: list, idx: int, selection: str,
     except Exception as e:                              # noqa: BLE001
         failures.warn_once("text-tts", "sin voz para las tarjetas de texto", e)
 
-    info = _word_info(selection, frase)
+    if whole:
+        selection = frase
+    info = _SENTENCE_INFO if whole else _word_info(selection, frase)
     lemma, pos = info["lemma"], info["pos"]
-    z = nlp.zipf(selection)
-    senses = _senses(selection, lemma) if languages.spanish_sources_active() else []
+    z = 0.0 if whole else nlp.zipf(selection)
+    senses = (_senses(selection, lemma)
+              if languages.spanish_sources_active() and not whole else [])
     frase_es = translate.sentence(frase)
     word_es = info["word_es"]
     return {
         "paraula": selection,
         "lema": lemma, "pos": pos, "headword": info["headword"],
-        "paraula_es": _card_word(info),
+        "paraula_es": frase_es if whole else _card_word(info),
         "senses": [{"es": es, "pos": p} for es, p in senses[:8]],
         "active": _active_sense(senses[:8], frase_es, word_es),
         "frase": frase,
         "frase_es": frase_es,
-        "freq_zipf": z, "freq_rank": nlp.freq_badge(z),
+        "freq_zipf": z, "freq_rank": "" if whole else nlp.freq_badge(z),
         "audio_file": audio_name,
         "image_file": "",
         "clip_file": "",
@@ -1474,15 +1497,18 @@ def card_preview(req: PreviewReq):
     if bad:
         return bad
     return _build_preview(s, req.segment_index, req.selection,
-                          req.pad_before, req.pad_after, req.offset)
+                          req.pad_before, req.pad_after, req.offset,
+                          whole=req.whole)
 
 
 class MineReq(BaseModel):
     session_id: str
     segment_index: int
-    selection: str
+    selection: str = ""
     paraula_es: str = ""
     offset: float = 0.0
+    # La frase entera (⇧ derecha), sin elegir palabra
+    whole: bool = False
 
 
 @app.post("/api/cards/mine")
@@ -1494,7 +1520,8 @@ def card_mine(req: MineReq):
     bad = _bad_index(s, req.segment_index)
     if bad:
         return bad
-    p = _build_preview(s, req.segment_index, req.selection, offset=req.offset)
+    p = _build_preview(s, req.segment_index, req.selection, offset=req.offset,
+                       whole=req.whole)
     active_es = (p["senses"][p["active"]]["es"]
                  if p["senses"] and p["active"] >= 0 else "")
     paraula_es = req.paraula_es or p["paraula_es"] or active_es
@@ -1505,7 +1532,7 @@ def card_mine(req: MineReq):
         freq_rank=p["freq_rank"], audio_file=p["audio_file"],
         image_file=p["clip_file"] or p["image_file"], font=p["font"],
         language=_lang(),
-        definicio=_definition(req.selection, p["lema"], p["pos"]))
+        definicio="" if req.whole else _definition(req.selection, p["lema"], p["pos"]))
     if p["lema"]:
         db.mark_learning_if_new(CON, p["lema"], _lang())
     sent = _flush()
@@ -1539,7 +1566,9 @@ def create_card(req: CardReq):
                          freq_rank=req.freq_rank, audio_file=req.audio_file,
                          image_file=req.image_file, font=req.font,
                          language=_lang(),
-                         definicio=_definition(req.paraula, req.lema, req.pos))
+                         # una frase entera no tiene lema ni entrada en el diccionario
+                         definicio=(_definition(req.paraula, req.lema, req.pos)
+                                    if req.lema else ""))
     if req.lema:
         db.mark_learning_if_new(CON, req.lema, _lang())
     sent = _flush()
@@ -1900,7 +1929,12 @@ _SETTING_TYPES = {
     "audio_trim": bool, "ui_lang": str, "keymap": dict,
     "base_language": str, "rec_min_zipf": (int, float),
     "reader_mark_known": bool, "card_layout": str, "deck_by_lang": dict,
+    "sentence_key": str,
 }
+# Teclas con función fija en el reproductor (ver el handler de app.js)
+_FIXED_KEYS = {"Space", "Enter", "Escape", "Tab", "ArrowLeft", "ArrowRight",
+               "ArrowUp", "ArrowDown", "BracketLeft", "BracketRight", "KeyK",
+               "Digit1", "Digit2", "Digit3", "Digit4", "Digit5"}
 _SETTING_RANGES = {"sub_scale": (0.3, 3.0), "speed_default": (0.25, 3.0),
                    "anki_port": (1, 65535), "rec_min_zipf": (0, 7)}
 
@@ -1940,6 +1974,15 @@ def post_settings(body: dict):
                 or len(keys) != len(set(keys))):
             return _err("err.bad_keys",
                         "atajos inválidos (letras a-z, sin repetir)")
+    if "keymap" in body or "sentence_key" in body:
+        # La tecla de la frase va por código («ShiftRight», «F5», «KeyX»), y
+        # no puede pisar una letra del mapa ni otra tecla fija
+        sk = body.get("sentence_key", _settings()["sentence_key"])
+        letters = {**_settings()["keymap"], **body.get("keymap", {})}.values()
+        if (not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,31}", sk)
+                or sk in _FIXED_KEYS
+                or (sk.startswith("Key") and sk[3:].lower() in letters)):
+            return _err("err.sentence_key", "tecla de la frase inválida u ocupada")
     if "deck_by_lang" in body and not all(
             isinstance(k, str) and isinstance(v, str) for k, v in body["deck_by_lang"].items()):
         return JSONResponse({"error": "tipo inválido para deck_by_lang"}, status_code=400)
