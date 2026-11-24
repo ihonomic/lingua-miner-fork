@@ -625,7 +625,8 @@ $("transcribe-btn").onclick = async () => {
   try {
     const model = $("model-select").value;
     // los modelos grandes tardan horas en CPU: que nadie lo descubra a mitad
-    if (!model.includes("small") && !confirm(t("tr.slow_confirm"))) return;
+    // turbo va a ~0,4× tiempo real: minutos, no horas, así que sin aviso
+    if (!model.includes("small") && model !== "turbo" && !confirm(t("tr.slow_confirm"))) return;
     const r = await api(`/api/sessions/${SESSION.id}/transcribe`,
       { method: "POST", body: JSON.stringify({ model }) });
     if (r.error) { toast(errMsg(r), "err"); return; }
@@ -1773,6 +1774,7 @@ function applySettings() {
     const WLBL = {
       "catala-large": t("wh.catala"),
       "large-v3": t("wh.large"),
+      "turbo": t("wh.turbo"),
       "small": t("wh.small"),
       "yue-small": t("wh.yue_small"),
       "yue-large": t("wh.yue_large"),

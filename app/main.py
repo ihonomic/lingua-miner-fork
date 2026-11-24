@@ -1003,7 +1003,15 @@ def do_transcribe(sid: str, req: TranscribeReq):
             db.update_transcript(CON, sid, json.dumps(segs), "-", "srt",
                                  nlp.TOK_VERSION)
         else:
-            segs = T.transcribe(jid, s["media_path"], req.model,
+            # los streams guardan una URL de yt-dlp que caduca en horas: sin
+            # re-resolverla, Whisper recibía un 403 de googlevideo
+            src = s["media_path"]
+            if s.get("source_type") == "stream" and s.get("page_url"):
+                fresh, _, _ = stream.stream_url(s["page_url"],
+                                                s.get("stream_height") or 0)
+                if fresh:
+                    src = fresh
+            segs = T.transcribe(jid, src, req.model,
                                 s["duration_secs"] or 0)
             db.update_transcript(CON, sid, json.dumps(segs), req.model,
                                  "whisper", nlp.TOK_VERSION)

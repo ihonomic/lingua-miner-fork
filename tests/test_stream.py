@@ -143,6 +143,29 @@ def test_stream_session_creates_and_reresolves(mock_resolve, tmp_path):
         assert u["is_hls"] is False
 
 
+def test_transcribe_stream_uses_a_fresh_url(tmp_path):
+    """La URL guardada al crear la sesión caduca: Whisper debe recibir una
+    fresca, o googlevideo responde 403."""
+    from app import transcribe as T
+    c = _client(tmp_path)
+    sid = main.db.create_session(
+        main.CON, language=main.languages.active_code(), title="v",
+        source_type="stream", media_path="stale", srt_source="none",
+        model_size="-", duration_secs=10.0, transcript_json="[]",
+        page_url="https://youtu.be/x", stream_height=360)
+    seen = {}
+
+    def fake(jid, path, model, dur):
+        seen["path"] = path
+        return []
+    with patch("app.main.stream.stream_url", return_value=("fresh", [], False)), \
+         patch.object(T, "transcribe", fake):
+        r = c.post(f"/api/sessions/{sid}/transcribe", json={"model": "small"}).json()
+        j = _wait(r["job_id"])
+    assert j["status"] == "done", j.get("message")
+    assert seen["path"] == "fresh"
+
+
 @patch("app.main.stream.resolve", return_value={})
 def test_stream_session_error_when_unresolvable(_m, tmp_path):
     c = _client(tmp_path)

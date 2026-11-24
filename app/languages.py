@@ -135,7 +135,9 @@ PROFILES = {
         "wordfreq": "de",
         "espeak": "de",
         "spacy": "de_core_news_sm",
-        "whisper_models": {"small": "small", "large-v3": "large-v3"},
+        # turbo: casi la calidad de large-v3 con un decodificador de 4 capas
+        "whisper_models": {"small": "small", "turbo": "large-v3-turbo",
+                           "large-v3": "large-v3"},
         "default_whisper": "small",
         "translate_repo": "gaudi/opus-mt-de-es-ctranslate2",     # OPUS-MT de→es CT2
         "translate_eos": True,
